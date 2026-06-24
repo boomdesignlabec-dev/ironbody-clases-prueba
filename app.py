@@ -24,6 +24,7 @@ WORKSHEET_NAME = "Registros"
 DISCIPLINAS = ["Pesas y cardio", "TRX", "Iron Reformer", "Cycling", "Jiujitsu"]
 COLUMNAS = [
     "Fecha registro",
+    "Fecha clase",
     "Nombre",
     "Cédula",
     "Celular",
@@ -228,7 +229,7 @@ def get_worksheet():
     creds = get_google_credentials()
     client = gspread.authorize(creds)
 
-    spreadsheet_id = st.secrets.get("spreadsheet_id", "")
+    spreadsheet_id = st.secrets.get("GOOGLE_SHEET_ID", st.secrets.get("spreadsheet_id", ""))
 
     try:
         if spreadsheet_id:
@@ -259,10 +260,25 @@ def credentials_email() -> str:
 
 
 def ensure_headers(worksheet) -> None:
+    """
+    Asegura que la hoja tenga todos los encabezados necesarios sin borrar datos existentes.
+    Si ya tienes registros anteriores, agrega columnas faltantes al final y conserva la información.
+    """
     existing = worksheet.row_values(1)
-    if existing != COLUMNAS:
-        worksheet.clear()
+
+    if not existing:
         worksheet.append_row(COLUMNAS)
+        return
+
+    updated_headers = existing.copy()
+    changed = False
+    for col in COLUMNAS:
+        if col not in updated_headers:
+            updated_headers.append(col)
+            changed = True
+
+    if changed:
+        worksheet.update("1:1", [updated_headers])
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -275,12 +291,17 @@ def load_data() -> pd.DataFrame:
     for col in COLUMNAS:
         if col not in df.columns:
             df[col] = ""
+
+    df["Fecha clase"] = df["Fecha clase"].astype(str).replace({"nan": "", "None": ""})
+    df["Fecha registro"] = df["Fecha registro"].astype(str).replace({"nan": "", "None": ""})
     return df[COLUMNAS]
 
 
 def save_record(record: Dict[str, str]) -> None:
     worksheet = get_worksheet()
-    worksheet.append_row([record[col] for col in COLUMNAS], value_input_option="USER_ENTERED")
+    headers = worksheet.row_values(1) or COLUMNAS
+    row = [record.get(col, "") for col in headers]
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
     load_data.clear()
 
 # =========================
@@ -323,7 +344,7 @@ with st.sidebar:
 
     page = st.radio(
         "",
-        ["📝 Registrar clase", "📊 Dashboard", "📋 Todos los registros"],
+        ["📝 Registrar clase", "📅 Clases de hoy", "📊 Dashboard", "📋 Todos los registros"],
         label_visibility="collapsed",
     )
 
@@ -373,11 +394,13 @@ if page == "📝 Registrar clase":
         with col2:
             cedula = st.text_input("Cédula *", placeholder="Ej: 1712345678")
 
-        col3, col4 = st.columns([1, 1])
+        col3, col4, col5 = st.columns([1, 1, 1])
         with col3:
             celular = st.text_input("Celular *", placeholder="Ej: 0991234567")
         with col4:
-            horario = st.text_input("Horario *", placeholder="Ej: Lunes 18:00")
+            fecha_clase = st.date_input("Fecha de clase *", value=date.today(), format="YYYY-MM-DD")
+        with col5:
+            horario = st.text_input("Horario *", placeholder="Ej: 18:00")
 
         disciplina = st.selectbox("Disciplina *", DISCIPLINAS)
 
@@ -401,6 +424,7 @@ if page == "📝 Registrar clase":
             else:
                 record = {
                     "Fecha registro": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "Fecha clase": fecha_clase.strftime("%Y-%m-%d"),
                     "Nombre": nombre_clean,
                     "Cédula": cedula_clean,
                     "Celular": celular_clean,
@@ -409,6 +433,82 @@ if page == "📝 Registrar clase":
                 }
                 save_record(record)
                 st.success("Registro guardado correctamente en Google Sheets.")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+elif page == "📅 Clases de hoy":
+    st.markdown('<div class="main-title">CLASES DE HOY</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="main-subtitle">Personas que tienen clase de prueba en la fecha seleccionada</div>',
+        unsafe_allow_html=True,
+    )
+
+    df = load_data()
+
+    st.markdown('<div class="content-card">', unsafe_allow_html=True)
+    fecha_consulta = st.date_input("Selecciona el día a revisar", value=date.today(), format="YYYY-MM-DD")
+    fecha_txt = fecha_consulta.strftime("%Y-%m-%d")
+
+    if df.empty:
+        st.info("Todavía no existen registros guardados.")
+    else:
+        clases_dia = df[df["Fecha clase"].astype(str).str[:10] == fecha_txt].copy()
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown(
+                f"""
+                <div class="metric-card">
+                    <div class="metric-label">Clases del día</div>
+                    <div class="metric-number">{len(clases_dia)}</div>
+                    <div class="metric-help">para {fecha_txt}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with col2:
+            disciplina_top_dia = "Sin datos"
+            if not clases_dia.empty:
+                disciplina_top_dia = clases_dia["Disciplina"].value_counts().index[0]
+            st.markdown(
+                f"""
+                <div class="metric-card">
+                    <div class="metric-label">Disciplina top</div>
+                    <div class="metric-number" style="font-size: 28px;">{disciplina_top_dia}</div>
+                    <div class="metric-help">en la fecha seleccionada</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with col3:
+            horarios = clases_dia["Horario"].replace("", pd.NA).dropna().nunique() if not clases_dia.empty else 0
+            st.markdown(
+                f"""
+                <div class="metric-card">
+                    <div class="metric-label">Horarios</div>
+                    <div class="metric-number">{horarios}</div>
+                    <div class="metric-help">horarios distintos</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown('<div class="section-title">LISTA DEL DÍA</div>', unsafe_allow_html=True)
+
+        if clases_dia.empty:
+            st.warning("No hay clases de prueba registradas para ese día.")
+        else:
+            columnas_vista = ["Fecha clase", "Horario", "Nombre", "Cédula", "Celular", "Disciplina"]
+            clases_dia = clases_dia[columnas_vista].sort_values(by=["Horario", "Nombre"], ascending=True)
+            st.dataframe(clases_dia, use_container_width=True, hide_index=True)
+
+            csv = clases_dia.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "Descargar lista del día",
+                data=csv,
+                file_name=f"iron_body_clases_{fecha_txt}.csv",
+                mime="text/csv",
+            )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -438,13 +538,13 @@ elif page == "📊 Dashboard":
             )
         with col2:
             hoy = date.today().strftime("%Y-%m-%d")
-            registros_hoy = df[df["Fecha registro"].astype(str).str.startswith(hoy)]
+            clases_hoy = df[df["Fecha clase"].astype(str).str[:10] == hoy]
             st.markdown(
                 f"""
                 <div class="metric-card">
-                    <div class="metric-label">Hoy</div>
-                    <div class="metric-number">{len(registros_hoy)}</div>
-                    <div class="metric-help">registrados hoy</div>
+                    <div class="metric-label">Clases hoy</div>
+                    <div class="metric-number">{len(clases_hoy)}</div>
+                    <div class="metric-help">agendadas para hoy</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -488,15 +588,21 @@ else:
         st.info("Todavía no existen registros guardados.")
     else:
         st.markdown('<div class="content-card">', unsafe_allow_html=True)
-        col1, col2 = st.columns([1, 1])
+        col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
             disciplina_filter = st.selectbox("Filtrar por disciplina", ["Todas"] + DISCIPLINAS)
         with col2:
+            fecha_filter = st.date_input("Filtrar por fecha de clase", value=None, format="YYYY-MM-DD")
+        with col3:
             search = st.text_input("Buscar por nombre, cédula o celular", placeholder="Escribe aquí...")
 
         filtered = df.copy()
         if disciplina_filter != "Todas":
             filtered = filtered[filtered["Disciplina"] == disciplina_filter]
+
+        if fecha_filter:
+            fecha_filter_txt = fecha_filter.strftime("%Y-%m-%d")
+            filtered = filtered[filtered["Fecha clase"].astype(str).str[:10] == fecha_filter_txt]
 
         if search.strip():
             s = search.strip().lower()
